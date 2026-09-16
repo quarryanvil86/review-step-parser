@@ -8,6 +8,11 @@
 // "mo" is spelled out on purpose, since "m" is already taken by minutes and
 // silently guessing which one a user meant is how these configs end up
 // scheduling a card for 30 minutes instead of 30 months.
+//
+// The day unit also accepts a decimal value, e.g. "1.5d", for schedules
+// that fall on a half day. The decimal must divide evenly into minutes
+// (1.5d is fine, 1.33d is rejected) since a step that can't be expressed
+// as a whole number of minutes isn't something a scheduler can act on.
 package schedstep
 
 import (
@@ -125,30 +130,79 @@ func (e *ParseError) Error() string {
 
 var stepPattern = regexp.MustCompile(`^([0-9]+)(mo|m|h|d|y)$`)
 
+// fractionalDayPattern matches a decimal day value like "1.5d". The
+// fractional part is capped at six digits, which is already far more
+// precision than dividing evenly into minutes can ever use.
+var fractionalDayPattern = regexp.MustCompile(`^([0-9]+)\.([0-9]{1,6})d$`)
+
 func parseStep(token string) (Step, error) {
-	m := stepPattern.FindStringSubmatch(token)
-	if m == nil {
-		return Step{}, errors.New("not a valid step (want a number followed by m, h, d, mo, or y)")
+	if m := stepPattern.FindStringSubmatch(token); m != nil {
+		value, err := strconv.ParseUint(m[1], 10, 32)
+		if err != nil {
+			return Step{}, fmt.Errorf("number out of range: %w", err)
+		}
+		if value == 0 {
+			return Step{}, errors.New("interval must be greater than zero")
+		}
+		if value > MaxStepValue {
+			return Step{}, fmt.Errorf("value exceeds maximum of %d", MaxStepValue)
+		}
+
+		unit, ok := unitFromSuffix(m[2])
+		if !ok {
+			// stepPattern only captures known suffixes, so this cannot happen.
+			return Step{}, fmt.Errorf("unknown unit %q", m[2])
+		}
+
+		return Step{Value: uint32(value), Unit: unit}, nil
 	}
 
-	value, err := strconv.ParseUint(m[1], 10, 32)
+	if m := fractionalDayPattern.FindStringSubmatch(token); m != nil {
+		return parseFractionalDayStep(m[1], m[2])
+	}
+
+	return Step{}, errors.New("not a valid step (want a number followed by m, h, d, mo, or y, or a decimal number followed by d)")
+}
+
+// parseFractionalDayStep converts a decimal day value into a Step expressed
+// in whole minutes, since Step has no field for a fractional value. Working
+// in scaled integers (rather than float64) means "1.5d" always lands on
+// exactly 2160 minutes instead of whatever the nearest float64 happens to be.
+func parseFractionalDayStep(wholePart, fracPart string) (Step, error) {
+	whole, err := strconv.ParseUint(wholePart, 10, 64)
 	if err != nil {
 		return Step{}, fmt.Errorf("number out of range: %w", err)
 	}
-	if value == 0 {
+	if whole > MaxStepValue {
+		// Bail out before the multiplications below, which would otherwise
+		// need to worry about overflowing uint64 for a value this large.
+		return Step{}, fmt.Errorf("value exceeds maximum of %dd", MaxStepValue)
+	}
+	frac, err := strconv.ParseUint(fracPart, 10, 64)
+	if err != nil {
+		return Step{}, fmt.Errorf("number out of range: %w", err)
+	}
+
+	denom := uint64(1)
+	for range fracPart {
+		denom *= 10
+	}
+	scaled := whole*denom + frac
+	if scaled == 0 {
 		return Step{}, errors.New("interval must be greater than zero")
 	}
-	if value > MaxStepValue {
-		return Step{}, fmt.Errorf("value exceeds maximum of %d", MaxStepValue)
+
+	numerator := scaled * unitMinutes[Day]
+	if numerator%denom != 0 {
+		return Step{}, errors.New("fractional day value does not divide evenly into whole minutes")
+	}
+	minutes := numerator / denom
+
+	if minutes > uint64(MaxStepValue)*unitMinutes[Day] {
+		return Step{}, fmt.Errorf("value exceeds maximum of %dd", MaxStepValue)
 	}
 
-	unit, ok := unitFromSuffix(m[2])
-	if !ok {
-		// stepPattern only captures known suffixes, so this cannot happen.
-		return Step{}, fmt.Errorf("unknown unit %q", m[2])
-	}
-
-	return Step{Value: uint32(value), Unit: unit}, nil
+	return Step{Value: uint32(minutes), Unit: Minute}, nil
 }
 
 // ParseSchedule parses a whitespace-separated list of steps and validates

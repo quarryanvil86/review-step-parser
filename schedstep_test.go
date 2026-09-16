@@ -51,6 +51,26 @@ func TestParseScheduleValid(t *testing.T) {
 			input: "9999d",
 			want:  []Step{{9999, Day}},
 		},
+		{
+			name:  "fractional day value",
+			input: "1.5d",
+			want:  []Step{{2160, Minute}},
+		},
+		{
+			name:  "fractional day smaller than a day",
+			input: "0.5d",
+			want:  []Step{{720, Minute}},
+		},
+		{
+			name:  "fractional day with two decimal digits",
+			input: "2.25d",
+			want:  []Step{{3240, Minute}},
+		},
+		{
+			name:  "fractional day mixed with whole steps",
+			input: "10m 1.5d 3d",
+			want:  []Step{{10, Minute}, {2160, Minute}, {3, Day}},
+		},
 	}
 
 	for _, tc := range cases {
@@ -84,13 +104,20 @@ func TestParseScheduleInvalid(t *testing.T) {
 		{"missing number", "d"},
 		{"uppercase unit is not the same as lowercase", "5M"},
 		{"negative number", "-5d"},
-		{"decimal value", "1.5d"},
 		{"decreasing interval", "1d 1h"},
 		{"decreasing interval later in the list", "1m 1h 30m"},
 		{"number overflows the step maximum", "10000d"},
 		{"number overflows the parser entirely", "99999999999999999999d"},
 		{"stray token mixed with valid ones", "1m foo 1h"},
 		{"too many steps", strings.TrimSpace(strings.Repeat("1m ", MaxSteps+1))},
+		{"fractional day that doesn't divide evenly into minutes", "1.33d"},
+		{"fractional value on a non-day unit", "1.5h"},
+		{"fractional minutes", "1.5m"},
+		{"fractional months", "1.5mo"},
+		{"fractional years", "1.5y"},
+		{"decimal point with no leading digit", ".5d"},
+		{"decimal point with no fractional digit", "1.d"},
+		{"fractional day whole part overflows the step maximum", "10000.5d"},
 	}
 
 	for _, tc := range cases {
@@ -153,6 +180,9 @@ func TestNormalize(t *testing.T) {
 		{"10m 60m 1440m", "10m 1h 1d"},
 		{"  10m    1h ", "10m 1h"},
 		{"1mo", "1mo"},
+		{"1.5d", "36h"},
+		{"0.5d", "12h"},
+		{"2.25d", "54h"},
 	}
 
 	for _, tc := range cases {
